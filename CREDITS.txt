@@ -1,0 +1,17 @@
+ADNAN'S WORLD - CREDITS
+=======================
+
+Game by Adnan.
+
+Game engine
+-----------
+Godot Engine (https://godotengine.org)
+Copyright (c) 2014-present Godot Engine contributors.
+Copyright (c) 2007-present Juan Linietsky, Ariel Manzur.
+Licensed under the MIT License (https://godotengine.org/license).
+
+Character model
+---------------
+"Valery tpose blender rigged woman" by xander.dice
+https://sketchfab.com/3d-models/valery-tpose-blender-rigged-woman-1cce3c0410634a9497fec3afc1fb8eda
+License: CC-BY-4.0 (http://creativecommons.org/licenses/by/4.0/)
