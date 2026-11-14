@@ -1,0 +1,117 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  GODOT_VERSION: "4.7.2"          # project is 4.7 -> use the newest 4.7.x
+  GODOT_STATUS: "stable"
+  ANDROID_BUILD_TOOLS: "35.0.1"
+  ANDROID_PLATFORM: "android-35"
+  # small Java heap: enough for apksigner / zipalign, never exhausts the runner
+  JAVA_TOOL_OPTIONS: "-Xmx1g"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find Godot project
+        run: |
+          P=$(find . -name project.godot -not -path './.git/*' | head -1)
+          [ -n "$P" ] || { echo "project.godot not found"; exit 1; }
+          echo "PROJECT_DIR=$(dirname "$P")" >> "$GITHUB_ENV"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Android SDK (already on runner, only add missing parts)
+        run: |
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_SDK=$SDK" >> "$GITHUB_ENV"
+          SM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SM" ] || SM=$(find "$SDK/cmdline-tools" -name sdkmanager | head -1)
+          yes | "$SM" --sdk_root="$SDK" --licenses > /dev/null || true
+          "$SM" --sdk_root="$SDK" "platform-tools" "build-tools;${ANDROID_BUILD_TOOLS}" "platforms;${ANDROID_PLATFORM}" > /dev/null
+          ls "$SDK/build-tools" "$SDK/platforms"
+
+      - name: Download Godot + export templates
+        run: |
+          BASE="https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}-${GODOT_STATUS}"
+          V="${GODOT_VERSION}-${GODOT_STATUS}"
+          wget -q "$BASE/Godot_v${V}_linux.x86_64.zip" -O godot.zip
+          wget -q "$BASE/Godot_v${V}_export_templates.tpz" -O templates.tpz
+          unzip -q godot.zip
+          mv "Godot_v${V}_linux.x86_64" /usr/local/bin/godot 2>/dev/null || sudo mv "Godot_v${V}_linux.x86_64" /usr/local/bin/godot
+          chmod +x /usr/local/bin/godot
+          mkdir -p "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_STATUS}"
+          unzip -q templates.tpz -d tpl
+          mv tpl/templates/* "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.${GODOT_STATUS}/"
+          rm -rf godot.zip templates.tpz tpl   # free disk
+          godot --version
+
+      - name: Configure Godot editor (SDK paths)
+        run: |
+          godot --headless --quit || true
+          CFG=$(find "$HOME/.config/godot" -name 'editor_settings*.tres' | head -1)
+          if [ -z "$CFG" ]; then
+            mkdir -p "$HOME/.config/godot"
+            CFG="$HOME/.config/godot/editor_settings-4.tres"
+            printf '[gd_resource type="EditorSettings" format=3]\n\n[resource]\n' > "$CFG"
+          fi
+          sed -i '/^export\/android\/\(android_sdk_path\|java_sdk_path\)/d' "$CFG"
+          {
+            echo "export/android/android_sdk_path = \"$ANDROID_SDK\""
+            echo "export/android/java_sdk_path = \"$JAVA_HOME\""
+          } >> "$CFG"
+          echo "Using $CFG"
+
+      - name: Signing key (your secret, or a temporary one)
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEYSTORE_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          KS="$RUNNER_TEMP/release.keystore"
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$KS"
+            ALIAS="${KEYSTORE_ALIAS:-adnan}"; PASS="$KEYSTORE_PASS"
+          else
+            echo "No secret keystore: making a temporary one (APK installs, but cannot update an older install)"
+            ALIAS="adnan"; PASS="android123"
+            keytool -genkeypair -v -keystore "$KS" -alias "$ALIAS" -keyalg RSA -keysize 2048 \
+              -validity 10000 -storepass "$PASS" -keypass "$PASS" -dname "CN=Adnan, O=MyPlant, C=BD" > /dev/null
+          fi
+          echo "GODOT_ANDROID_KEYSTORE_RELEASE_PATH=$KS" >> "$GITHUB_ENV"
+          echo "GODOT_ANDROID_KEYSTORE_RELEASE_USER=$ALIAS" >> "$GITHUB_ENV"
+          echo "GODOT_ANDROID_KEYSTORE_RELEASE_PASSWORD=$PASS" >> "$GITHUB_ENV"
+
+      - name: Version code = build number
+        run: |
+          sed -i "s/^version\/code=.*/version\/code=$((100 + GITHUB_RUN_NUMBER))/" "$PROJECT_DIR/export_presets.cfg"
+
+      - name: Import assets
+        run: |
+          cd "$PROJECT_DIR"
+          godot --headless --import 2>&1 | tail -n 30 || true
+
+      - name: Export APK (arm64, release, no Gradle)
+        run: |
+          cd "$PROJECT_DIR"
+          mkdir -p "$GITHUB_WORKSPACE/build"
+          godot --headless --export-release "Android" "$GITHUB_WORKSPACE/build/CraftX.apk"
+          ls -lh "$GITHUB_WORKSPACE/build"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CraftX-apk
+          path: build/CraftX.apk
+          retention-days: 30
